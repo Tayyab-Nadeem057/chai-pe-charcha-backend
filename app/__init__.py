@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
 from flask_cors import CORS
@@ -15,6 +15,36 @@ def create_app():
     db.init_app(app)
     jwt.init_app(app)
     CORS(app)
+
+    # ── Health-check routes (stops 404 on base URL / Render pings) ──
+    @app.route("/")
+    def index():
+        return jsonify({
+            "name":    "Chai Pe Charcha API",
+            "status":  "online",
+            "version": "1.0",
+            "docs":    {
+                "menu":    "/api/menu",
+                "orders":  "/api/orders",
+                "login":   "/api/auth/login",
+                "admin":   "/api/admin/orders",
+            }
+        }), 200
+
+    @app.route("/api")
+    def api_root():
+        return jsonify({
+            "name":    "Chai Pe Charcha API",
+            "status":  "online",
+            "endpoints": [
+                "GET  /api/menu",
+                "POST /api/orders",
+                "GET  /api/orders/<id>",
+                "POST /api/auth/login",
+                "GET  /api/admin/orders  (JWT required)",
+                "GET  /api/admin/stats   (JWT required)",
+            ]
+        }), 200
 
     # Register blueprints
     from .routes.auth   import auth_bp
