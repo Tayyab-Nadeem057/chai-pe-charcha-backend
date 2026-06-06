@@ -2,18 +2,25 @@ from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
 from flask_cors import CORS
+from flask_compress import Compress
 from config import Config
 
-db  = SQLAlchemy()
-jwt = JWTManager()
+db       = SQLAlchemy()
+jwt      = JWTManager()
+compress = Compress()
 
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+    # Gzip/brotli compress all JSON responses automatically
+    app.config['COMPRESS_MIMETYPES'] = ['application/json', 'text/html', 'text/css', 'text/javascript']
+    app.config['COMPRESS_LEVEL'] = 6
+    app.config['COMPRESS_MIN_SIZE'] = 500
 
     db.init_app(app)
     jwt.init_app(app)
+    compress.init_app(app)
     CORS(app)
 
     # ── Health-check routes (stops 404 on base URL / Render pings) ──

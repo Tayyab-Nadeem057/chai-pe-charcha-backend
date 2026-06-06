@@ -1,10 +1,16 @@
-from flask import Blueprint, request
+from flask import Blueprint, request, make_response
 from .. import db
 from ..models import Order, OrderItem, MenuCategory
 from ..utils import ok, err
+import time
+import json
 
 user_bp = Blueprint("user", __name__)
 VALID_SERVICES = {"delivery", "takeaway", "dinein"}
+
+# In-memory menu cache: key -> (json_string, expires_at)
+_menu_cache = {}
+MENU_CACHE_TTL = 300  # 5 minutes
 
 
 @user_bp.route("/menu", methods=["GET"])
@@ -12,13 +18,36 @@ def get_menu():
     service = (request.args.get("service") or "").strip().lower()
     if service and service not in VALID_SERVICES:
         return err("service must be delivery, takeaway, or dinein", 400)
+
+    cache_key = service or "all"
+    now = time.time()
+
+    # Serve from cache if fresh
+    if cache_key in _menu_cache:
+        cached_data, expires_at = _menu_cache[cache_key]
+        if now < expires_at:
+            resp = make_response(cached_data)
+            resp.headers["Content-Type"] = "application/json"
+            resp.headers["Cache-Control"] = "public, max-age=300"
+            resp.headers["X-Cache"] = "HIT"
+            return resp
+
+    # Build fresh response
     cats = MenuCategory.query.order_by(MenuCategory.sort_order).all()
     result = []
     for cat in cats:
         d = cat.to_dict(include_items=True, service=service or None)
         if d.get("items"):
             result.append(d)
-    return ok({"categories": result, "service": service or "all"})
+
+    payload = json.dumps({"status": "success", "data": {"categories": result, "service": cache_key}})
+    _menu_cache[cache_key] = (payload, now + MENU_CACHE_TTL)
+
+    resp = make_response(payload)
+    resp.headers["Content-Type"] = "application/json"
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    resp.headers["X-Cache"] = "MISS"
+    return resp
 
 
 @user_bp.route("/orders", methods=["POST"])
