@@ -73,3 +73,14 @@ CAT_DEFAULTS = {
 }
 
 DEFAULT_FLAGS = {"dine_in": True, "takeaway": True, "delivery": True}
+
+# Variant pricing now lives in the DATABASE (was hardcoded in the frontend).
+# Each variant: {"label": str, "price_offset": number added to base price}.
+VARIANT_MAP = {
+    "karhai": [{"label": "Half", "price_offset": 0}, {"label": "Full", "price_offset": 400}],
+    "pasta":  [{"label": "Half", "price_offset": 0}, {"label": "Full", "price_offset": 150}],
+    "pizza":  [{"label": "Small", "price_offset": 0}, {"label": "Medium", "price_offset": 150}, {"label": "Large", "price_offset": 300}],
+    "tikka":  [{"label": "Leg", "price_offset": 0}, {"label": "Chest", "price_offset": 50}],
+    "boti":   [{"label": "Single", "price_offset": 0}, {"label": "Full", "price_offset": 250}],
+    "wings":  [{"label": "Leg", "price_offset": 0}, {"label": "Chest", "price_offset": 50}],
+}

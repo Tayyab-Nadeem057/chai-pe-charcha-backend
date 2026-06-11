@@ -1,0 +1,22 @@
+# Secrets & env
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Database & uploads (runtime data — never commit)
+instance/
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+!uploads/.gitkeep
+
+# OS
+.DS_Store

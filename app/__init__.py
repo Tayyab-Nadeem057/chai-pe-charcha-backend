@@ -1,19 +1,26 @@
-from flask import Flask, jsonify
+import os
+from flask import Flask, jsonify, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
 from flask_cors import CORS
 from flask_compress import Compress
+from flask_migrate import Migrate
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from config import Config
 
 db       = SQLAlchemy()
 jwt      = JWTManager()
 compress = Compress()
+migrate  = Migrate()
+limiter  = Limiter(key_func=get_remote_address, default_limits=[])
 
 
-def create_app():
+def create_app(config_object=Config):
     app = Flask(__name__)
-    app.config.from_object(Config)
-    # Gzip/brotli compress all JSON responses automatically
+    app.config.from_object(config_object)
+
+    # Gzip/brotli compress JSON + text responses automatically
     app.config['COMPRESS_MIMETYPES'] = ['application/json', 'text/html', 'text/css', 'text/javascript']
     app.config['COMPRESS_LEVEL'] = 6
     app.config['COMPRESS_MIN_SIZE'] = 500
@@ -21,102 +28,93 @@ def create_app():
     db.init_app(app)
     jwt.init_app(app)
     compress.init_app(app)
-    CORS(app)
+    migrate.init_app(app, db)
+    limiter.init_app(app)
 
-    # ── Health-check routes (stops 404 on base URL / Render pings) ──
+    # ── CORS: explicit origins only, credentials enabled for cookies ──
+    origins = app.config.get("FRONTEND_ORIGINS") or [
+        "http://localhost:5000", "http://127.0.0.1:5000",
+        "http://localhost:5500", "http://127.0.0.1:5500",
+    ]
+    CORS(app, resources={r"/api/*": {"origins": origins}}, supports_credentials=True)
+
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
+    # ── JWT error handlers → JSON (so the frontend can redirect on 401) ──
+    @jwt.unauthorized_loader
+    def _missing_token(reason):
+        return jsonify({"success": False, "message": "Authentication required"}), 401
+
+    @jwt.invalid_token_loader
+    def _invalid_token(reason):
+        return jsonify({"success": False, "message": "Invalid session"}), 401
+
+    @jwt.expired_token_loader
+    def _expired_token(header, payload):
+        return jsonify({"success": False, "message": "Session expired, please log in again"}), 401
+
+    # ── Health-check routes ──
     @app.route("/")
     def index():
-        return jsonify({
-            "name":    "Chai Pe Charcha API",
-            "status":  "online",
-            "version": "1.0",
-            "docs":    {
-                "menu":    "/api/menu",
-                "orders":  "/api/orders",
-                "login":   "/api/auth/login",
-                "admin":   "/api/admin/orders",
-            }
-        }), 200
+        return jsonify({"name": "Chai Pe Charcha API", "status": "online", "version": "2.0"}), 200
 
     @app.route("/api")
     def api_root():
-        return jsonify({
-            "name":    "Chai Pe Charcha API",
-            "status":  "online",
-            "endpoints": [
-                "GET  /api/menu",
-                "POST /api/orders",
-                "GET  /api/orders/<id>",
-                "POST /api/auth/login",
-                "GET  /api/admin/orders  (JWT required)",
-                "GET  /api/admin/stats   (JWT required)",
-            ]
-        }), 200
+        return jsonify({"name": "Chai Pe Charcha API", "status": "online"}), 200
+
+    # ── Serve uploaded menu images ──
+    @app.route("/uploads/<path:filename>")
+    def uploaded_file(filename):
+        resp = send_from_directory(app.config["UPLOAD_FOLDER"], filename)
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
+
+    # ── Request body too large (file uploads) ──
+    @app.errorhandler(413)
+    def _too_large(e):
+        return jsonify({"success": False, "message": "File too large (max 6 MB)"}), 413
 
     # Register blueprints
-    from .routes.auth   import auth_bp
-    from .routes.user   import user_bp
-    from .routes.admin  import admin_bp
+    from .routes.auth  import auth_bp
+    from .routes.user  import user_bp
+    from .routes.admin import admin_bp
 
     app.register_blueprint(auth_bp,  url_prefix="/api/auth")
     app.register_blueprint(user_bp,  url_prefix="/api")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
 
-    # Create tables + seed default admin
+    # Create tables + seed menu (NOT an admin — admins are created explicitly).
+    # In production with Postgres, prefer `flask db upgrade`. create_all() is a
+    # safe no-op for already-migrated tables and keeps local SQLite dev simple.
     with app.app_context():
         db.create_all()
-        _seed_admin()
         _seed_menu()
 
     return app
 
 
-def _seed_admin():
-    """Create a default admin account if none exists."""
-    from .models import User
-    from werkzeug.security import generate_password_hash
-    if not User.query.filter_by(role="admin").first():
-        admin = User(
-            name="Admin",
-            phone="0000000000",
-            address="Chai Pe Charcha HQ",
-            password=generate_password_hash("admin123"),
-            role="admin",
-        )
-        db.session.add(admin)
-        db.session.commit()
-        print("[OK] Default admin created  ->  phone: 0000000000 | password: admin123")
-
-
 def _seed_menu():
+    """One-time menu seed when the catalog is empty. No admin is ever seeded."""
     from .models import MenuCategory, MenuItem
-    from .seed_menu import SEED_CATEGORIES, CAT_DEFAULTS, DEFAULT_FLAGS
+    from .seed_menu import SEED_CATEGORIES, CAT_DEFAULTS, DEFAULT_FLAGS, VARIANT_MAP
     if MenuItem.query.first():
         return
-    sort_cat = 0
-    for cat_data in SEED_CATEGORIES:
+    for sort_cat, cat_data in enumerate(SEED_CATEGORIES):
         cat = MenuCategory(
-            id=cat_data["id"],
-            label=cat_data["label"],
-            description=cat_data["desc"],
-            folder=cat_data["folder"],
+            id=cat_data["id"], label=cat_data["label"],
+            description=cat_data["desc"], folder=cat_data["folder"],
             sort_order=sort_cat,
         )
         db.session.add(cat)
         flags = {**DEFAULT_FLAGS, **CAT_DEFAULTS.get(cat_data["id"], {})}
+        variants = VARIANT_MAP.get(cat_data["id"])
         for i, (name, price, img) in enumerate(zip(
             cat_data["names"], cat_data["prices"], cat_data["images"]
         )):
             db.session.add(MenuItem(
-                category_id=cat_data["id"],
-                name=name,
-                price=float(price),
-                image_file=img,
-                dine_in=flags["dine_in"],
-                takeaway=flags["takeaway"],
-                delivery=flags["delivery"],
-                sort_order=i,
+                category_id=cat_data["id"], name=name, price=float(price),
+                image_file=img, dine_in=flags["dine_in"], takeaway=flags["takeaway"],
+                delivery=flags["delivery"], sort_order=i, variants=variants,
             ))
-        sort_cat += 1
     db.session.commit()
     print(f"[OK] Menu seeded — {MenuItem.query.count()} items")

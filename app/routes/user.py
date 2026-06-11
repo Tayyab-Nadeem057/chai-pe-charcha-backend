@@ -1,38 +1,19 @@
 from flask import Blueprint, request, make_response
-from .. import db
-from ..models import Order, OrderItem, MenuCategory
-from ..utils import ok, err
-import time
 import json
+from .. import db, limiter
+from ..models import Order, OrderItem, MenuCategory, MenuItem
+from ..utils import ok, err, clean_str, valid_phone, normalize_phone
 
 user_bp = Blueprint("user", __name__)
 VALID_SERVICES = {"delivery", "takeaway", "dinein"}
 
-# In-memory menu cache: key -> (json_string, expires_at)
-_menu_cache = {}
-MENU_CACHE_TTL = 300  # 5 minutes
-
 
 @user_bp.route("/menu", methods=["GET"])
 def get_menu():
-    service = (request.args.get("service") or "").strip().lower()
+    service = clean_str(request.args.get("service"), 20).lower()
     if service and service not in VALID_SERVICES:
         return err("service must be delivery, takeaway, or dinein", 400)
 
-    cache_key = service or "all"
-    now = time.time()
-
-    # Serve from cache if fresh
-    if cache_key in _menu_cache:
-        cached_data, expires_at = _menu_cache[cache_key]
-        if now < expires_at:
-            resp = make_response(cached_data)
-            resp.headers["Content-Type"] = "application/json"
-            resp.headers["Cache-Control"] = "public, max-age=300"
-            resp.headers["X-Cache"] = "HIT"
-            return resp
-
-    # Build fresh response
     cats = MenuCategory.query.order_by(MenuCategory.sort_order).all()
     result = []
     for cat in cats:
@@ -40,62 +21,97 @@ def get_menu():
         if d.get("items"):
             result.append(d)
 
-    payload = json.dumps({"status": "success", "data": {"categories": result, "service": cache_key}})
-    _menu_cache[cache_key] = (payload, now + MENU_CACHE_TTL)
-
+    payload = json.dumps({"status": "success",
+                          "data": {"categories": result, "service": service or "all"}})
     resp = make_response(payload)
     resp.headers["Content-Type"] = "application/json"
-    resp.headers["Cache-Control"] = "public, max-age=300"
-    resp.headers["X-Cache"] = "MISS"
+    # Short cache → multi-worker safe (no shared in-process cache needed) and
+    # admin menu edits appear within ~30s. CDNs/browsers honour this.
+    resp.headers["Cache-Control"] = "public, max-age=30, must-revalidate"
     return resp
 
 
 @user_bp.route("/orders", methods=["POST"])
+@limiter.limit("20 per minute; 200 per day")
 def place_order():
     data    = request.get_json(silent=True) or {}
-    name    = (data.get("name")             or "").strip()
-    phone   = (data.get("phone")            or "").strip()
-    address = (data.get("delivery_address") or "").strip()
+    name    = clean_str(data.get("name"), 120)
+    phone   = clean_str(data.get("phone"), 20)
+    address = clean_str(data.get("delivery_address"), 500)
+    service = clean_str(data.get("service"), 20).lower() or "delivery"
     items   = data.get("items")
 
-    if not name:    return err("name is required", 400)
-    if not phone:   return err("phone is required", 400)
-    if not address: return err("delivery_address is required", 400)
-    if not items or not isinstance(items, list) or len(items) == 0:
+    if not name:
+        return err("name is required", 400)
+    if not valid_phone(phone):
+        return err("A valid phone number is required", 400)
+    if not address:
+        return err("delivery_address is required", 400)
+    if service not in VALID_SERVICES:
+        return err("invalid service type", 400)
+    if not isinstance(items, list) or not items:
         return err("items list is required and must not be empty", 400)
+    if len(items) > 100:
+        return err("too many items in a single order", 400)
 
+    # ── Server-side pricing: prices come ONLY from the database ──
     validated = []
-    for idx, item in enumerate(items):
-        iname    = (item.get("item_name") or "").strip()
-        quantity = item.get("quantity")
-        price    = item.get("price")
-        if not iname:
-            return err(f"items[{idx}].item_name is required", 400)
-        if not isinstance(quantity, int) or quantity < 1:
-            return err(f"items[{idx}].quantity must be a positive integer", 400)
-        if not isinstance(price, (int, float)) or price < 0:
-            return err(f"items[{idx}].price must be non-negative", 400)
-        validated.append({"item_name": iname, "quantity": quantity, "price": float(price)})
+    total = 0.0
+    for idx, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            return err(f"items[{idx}] is malformed", 400)
+        item_id = raw.get("item_id")
+        variant = clean_str(raw.get("variant"), 40) or None
+        qty     = raw.get("quantity")
 
-    total = round(sum(i["quantity"] * i["price"] for i in validated), 2)
+        if not isinstance(qty, int) or not (1 <= qty <= 50):
+            return err(f"items[{idx}].quantity must be an integer 1–50", 400)
 
-    order = Order(guest_name=name, guest_phone=phone,
-                  total_price=total, delivery_address=address, status="Pending")
+        menu_item = db.session.get(MenuItem, item_id) if item_id is not None else None
+        if not menu_item or not menu_item.is_active:
+            return err(f"items[{idx}] is not available", 400)
+        if menu_item.sold_out:
+            return err(f"'{menu_item.name}' is sold out", 409)
+
+        try:
+            unit_price = menu_item.price_for_variant(variant)   # authoritative
+        except ValueError as e:
+            return err(str(e), 400)
+
+        display_name = f"{menu_item.name} ({variant})" if variant else menu_item.name
+        total += unit_price * qty
+        validated.append({
+            "item_id": menu_item.id, "item_name": display_name,
+            "quantity": qty, "price": unit_price,
+        })
+
+    total = round(total, 2)
+
+    order = Order(guest_name=name, guest_phone=normalize_phone(phone),
+                  total_price=total, delivery_address=address,
+                  service=service, status="Pending")
     db.session.add(order)
     db.session.flush()
 
-    for i in validated:
-        db.session.add(OrderItem(order_id=order.id,
-                                 item_name=i["item_name"],
-                                 quantity=i["quantity"],
-                                 price=i["price"]))
+    for v in validated:
+        db.session.add(OrderItem(order_id=order.id, item_id=v["item_id"],
+                                 item_name=v["item_name"], quantity=v["quantity"],
+                                 price=v["price"]))
     db.session.commit()
     return ok(order.to_dict(), "Order placed successfully", 201)
 
 
 @user_bp.route("/orders/<int:order_id>", methods=["GET"])
 def get_order(order_id):
-    order = Order.query.get(order_id)
+    """Public order tracking. Requires the matching phone number to view details
+    (prevents enumerating other people's orders by ID)."""
+    order = db.session.get(Order, order_id)
     if not order:
         return err("Order not found", 404)
-    return ok(order.to_dict())
+
+    phone = request.args.get("phone")
+    if phone and normalize_phone(phone) == order.guest_phone:
+        return ok(order.to_dict())
+    # Without phone proof, expose only non-sensitive status.
+    return ok({"id": order.id, "status": order.status,
+               "created_at": order.created_at.isoformat()})
