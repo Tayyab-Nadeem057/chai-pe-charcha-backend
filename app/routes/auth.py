@@ -4,7 +4,7 @@ from flask import Blueprint, request, jsonify
 from werkzeug.security import check_password_hash, generate_password_hash
 from flask_jwt_extended import (
     create_access_token, jwt_required, get_jwt_identity,
-    set_access_cookies, unset_jwt_cookies,
+    set_access_cookies, unset_jwt_cookies, get_csrf_token,
 )
 from .. import db, limiter
 from ..models import User, PasswordReset
@@ -38,8 +38,11 @@ def login():
 
     token = create_access_token(identity=str(user.id),
                                 additional_claims={"role": user.role})
+    # Return the CSRF token in the body too. The JWT stays in an httpOnly cookie
+    # (XSS-safe); the CSRF token is echoed back as a header on writes. This is the
+    # pattern that works when frontend and backend are on different domains.
     resp = jsonify({"success": True, "message": "Login successful",
-                    "data": {"user": user.to_dict()}})
+                    "data": {"user": user.to_dict(), "csrf": get_csrf_token(token)}})
     set_access_cookies(resp, token)   # httpOnly cookie + CSRF cookie
     return resp, 200
 
