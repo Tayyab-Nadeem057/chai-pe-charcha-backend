@@ -142,3 +142,17 @@ class OrderItem(db.Model):
             "quantity": self.quantity, "price": self.price,
             "subtotal": round(self.quantity * self.price, 2),
         }
+
+
+class PasswordReset(db.Model):
+    """One-time WhatsApp OTP codes for self-service password reset.
+    Separate table so it's created without altering existing tables."""
+    __tablename__ = "password_resets"
+
+    id         = db.Column(db.Integer, primary_key=True)
+    phone      = db.Column(db.String(20), nullable=False, index=True)
+    code_hash  = db.Column(db.String(256), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    attempts   = db.Column(db.Integer, default=0, nullable=False)
+    used       = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

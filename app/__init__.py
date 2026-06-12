@@ -89,8 +89,44 @@ def create_app(config_object=Config):
     with app.app_context():
         db.create_all()
         _seed_menu()
+        _bootstrap_admin()
 
     return app
+
+
+def _bootstrap_admin():
+    """Create the FIRST admin from env vars — only when no users exist yet.
+
+    Secure one-time bootstrap so you never need the Render Shell:
+      set BOOTSTRAP_ADMIN_PHONE + BOOTSTRAP_ADMIN_PASSWORD (and optionally
+      BOOTSTRAP_ADMIN_NAME) → admin is created on the next deploy.
+    Once an admin exists this is a no-op, so it's safe to leave configured.
+    Delete BOOTSTRAP_ADMIN_PASSWORD afterwards as good hygiene.
+    """
+    from .models import User
+    from .utils import valid_phone, normalize_phone, valid_password
+    from werkzeug.security import generate_password_hash
+
+    phone = (os.environ.get("BOOTSTRAP_ADMIN_PHONE") or "").strip()
+    pw    = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD") or ""
+    name  = (os.environ.get("BOOTSTRAP_ADMIN_NAME") or "Admin").strip()
+
+    if not phone or not pw:
+        return                      # not configured — nothing to do
+    if User.query.count() > 0:
+        return                      # already have accounts — never overwrite
+    if not valid_phone(phone):
+        print("[WARN] BOOTSTRAP_ADMIN_PHONE is not a valid phone — skipping bootstrap")
+        return
+    if not valid_password(pw):
+        print("[WARN] BOOTSTRAP_ADMIN_PASSWORD must be at least 8 chars — skipping bootstrap")
+        return
+
+    db.session.add(User(name=name, phone=normalize_phone(phone), address="—",
+                        password=generate_password_hash(pw), role="admin"))
+    db.session.commit()
+    print(f"[OK] Bootstrap admin created (phone {normalize_phone(phone)}). "
+          f"You can now delete BOOTSTRAP_ADMIN_PASSWORD from the environment.")
 
 
 def _seed_menu():

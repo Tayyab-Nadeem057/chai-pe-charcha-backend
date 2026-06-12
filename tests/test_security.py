@@ -115,3 +115,58 @@ def test_invalid_phone_rejected(client, app):
         "name": "X", "phone": "12", "delivery_address": "St",
         "items": [{"item_id": item_id, "quantity": 1}]})
     assert r.status_code == 400
+
+
+# ── Password reset (WhatsApp OTP) ─────────────────────────────────
+def _seed_reset_user(app, phone, code, expired=False):
+    from datetime import datetime, timedelta
+    from werkzeug.security import generate_password_hash
+    from app import db
+    from app.models import User, PasswordReset
+    with app.app_context():
+        if not User.query.filter_by(phone=phone).first():
+            db.session.add(User(name="Reset User", phone=phone, address="HQ",
+                                password=generate_password_hash("oldpassword8"), role="admin"))
+        PasswordReset.query.filter_by(phone=phone).delete()
+        exp = datetime.utcnow() + timedelta(minutes=(-1 if expired else 10))
+        db.session.add(PasswordReset(phone=phone, code_hash=generate_password_hash(code),
+                                     expires_at=exp))
+        db.session.commit()
+
+
+def test_forgot_password_is_generic_for_unknown_phone(client):
+    # Must not reveal whether a phone exists (anti-enumeration).
+    r = client.post("/api/auth/forgot-password", json={"phone": "03009990000"})
+    assert r.status_code == 200
+    assert r.get_json()["success"] is True
+
+
+def test_reset_with_valid_code_succeeds(client, app):
+    _seed_reset_user(app, "03007770001", "123456")
+    r = client.post("/api/auth/reset-password", json={
+        "phone": "03007770001", "code": "123456", "new_password": "brandnew123"})
+    assert r.status_code == 200
+    # The new password now works
+    login = client.post("/api/auth/login", json={"phone": "03007770001", "password": "brandnew123"})
+    assert login.status_code == 200
+
+
+def test_reset_with_wrong_code_fails(client, app):
+    _seed_reset_user(app, "03007770002", "123456")
+    r = client.post("/api/auth/reset-password", json={
+        "phone": "03007770002", "code": "000000", "new_password": "brandnew123"})
+    assert r.status_code == 400
+
+
+def test_reset_with_expired_code_fails(client, app):
+    _seed_reset_user(app, "03007770003", "123456", expired=True)
+    r = client.post("/api/auth/reset-password", json={
+        "phone": "03007770003", "code": "123456", "new_password": "brandnew123"})
+    assert r.status_code == 400
+
+
+def test_reset_short_password_rejected(client, app):
+    _seed_reset_user(app, "03007770004", "123456")
+    r = client.post("/api/auth/reset-password", json={
+        "phone": "03007770004", "code": "123456", "new_password": "short"})
+    assert r.status_code == 400

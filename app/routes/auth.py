@@ -1,3 +1,5 @@
+import secrets
+from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
 from werkzeug.security import check_password_hash, generate_password_hash
 from flask_jwt_extended import (
@@ -5,10 +7,14 @@ from flask_jwt_extended import (
     set_access_cookies, unset_jwt_cookies,
 )
 from .. import db, limiter
-from ..models import User
-from ..utils import ok, err, clean_str, normalize_phone, valid_password
+from ..models import User, PasswordReset
+from ..notifications import send_whatsapp
+from ..utils import ok, err, clean_str, normalize_phone, valid_phone, valid_password
 
 auth_bp = Blueprint("auth", __name__)
+
+RESET_CODE_TTL_MIN = 10
+RESET_MAX_ATTEMPTS = 5
 
 # NOTE: There is intentionally NO public /register route. Admin accounts are
 # created only via create_admin.py (CLI) or the protected POST /api/admin/staff
@@ -75,3 +81,74 @@ def change_password():
     user.password = generate_password_hash(new_password)
     db.session.commit()
     return ok(None, "Password changed successfully")
+
+
+# ── Self-service password reset via WhatsApp OTP ──────────────────
+@auth_bp.route("/forgot-password", methods=["POST"])
+@limiter.limit("3 per 10 minutes; 10 per day")
+def forgot_password():
+    """Step 1: send a 6-digit code to the registered phone via WhatsApp.
+    Always returns a generic success so attackers can't tell which phones exist."""
+    phone = normalize_phone(clean_str((request.get_json(silent=True) or {}).get("phone"), 20))
+    generic = ok(None, "If that number has an account, a reset code has been sent on WhatsApp.")
+
+    if not phone:
+        return generic
+    user = User.query.filter_by(phone=phone).first()
+    if not user:
+        return generic  # don't reveal non-existence
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    # Invalidate any previous codes for this phone
+    PasswordReset.query.filter_by(phone=phone, used=False).update({"used": True})
+    db.session.add(PasswordReset(
+        phone=phone,
+        code_hash=generate_password_hash(code),
+        expires_at=datetime.utcnow() + timedelta(minutes=RESET_CODE_TTL_MIN),
+    ))
+    db.session.commit()
+
+    send_whatsapp(phone, f"Your Chai Pe Charcha admin reset code is {code}. "
+                         f"It expires in {RESET_CODE_TTL_MIN} minutes. "
+                         f"If you didn't request this, ignore this message.")
+    return generic
+
+
+@auth_bp.route("/reset-password", methods=["POST"])
+@limiter.limit("10 per hour")
+def reset_password():
+    """Step 2: verify the code + set a new password."""
+    data  = request.get_json(silent=True) or {}
+    phone = normalize_phone(clean_str(data.get("phone"), 20))
+    code  = clean_str(data.get("code"), 10)
+    new_password = data.get("new_password") or ""
+
+    if not phone or not code:
+        return err("phone and code are required", 400)
+    if not valid_password(new_password):
+        return err("New password must be at least 8 characters", 400)
+
+    pr = (PasswordReset.query
+          .filter_by(phone=phone, used=False)
+          .order_by(PasswordReset.created_at.desc())
+          .first())
+    if not pr or pr.expires_at < datetime.utcnow():
+        return err("Invalid or expired code. Please request a new one.", 400)
+    if pr.attempts >= RESET_MAX_ATTEMPTS:
+        pr.used = True
+        db.session.commit()
+        return err("Too many attempts. Please request a new code.", 429)
+
+    if not check_password_hash(pr.code_hash, code):
+        pr.attempts += 1
+        db.session.commit()
+        return err("Incorrect code.", 400)
+
+    user = User.query.filter_by(phone=phone).first()
+    if not user:
+        return err("Account not found", 404)
+
+    user.password = generate_password_hash(new_password)
+    pr.used = True
+    db.session.commit()
+    return ok(None, "Password reset successfully. You can now log in.")
