@@ -41,14 +41,12 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
 
-    # ── JWT — stored in httpOnly cookies, not localStorage ────────
-    JWT_TOKEN_LOCATION = ["cookies"]
-    JWT_ACCESS_COOKIE_PATH = "/api"
-    JWT_COOKIE_CSRF_PROTECT = True          # double-submit CSRF token
-    JWT_COOKIE_SAMESITE = os.environ.get("JWT_COOKIE_SAMESITE", "None")
-    JWT_COOKIE_SECURE = os.environ.get("JWT_COOKIE_SECURE", "true").lower() == "true"
+    # ── JWT — Authorization: Bearer header ────────────────────────
+    # The frontend (GitHub Pages) and backend (Render) are on different domains,
+    # so cross-site cookies are blocked by mobile browsers. We use a Bearer token
+    # instead, which works everywhere. XSS is mitigated by escaping all output.
+    JWT_TOKEN_LOCATION = ["headers"]
     JWT_ACCESS_TOKEN_EXPIRES = 60 * 60 * 12  # 12 hours
-    JWT_SESSION_COOKIE = False               # persist across browser restarts
 
     # ── CORS ──────────────────────────────────────────────────────
     # Exact frontend origin(s) only. Comma-separated in FRONTEND_ORIGINS.

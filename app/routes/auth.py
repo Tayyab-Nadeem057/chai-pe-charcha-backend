@@ -4,11 +4,10 @@ from flask import Blueprint, request, jsonify
 from werkzeug.security import check_password_hash, generate_password_hash
 from flask_jwt_extended import (
     create_access_token, jwt_required, get_jwt_identity,
-    set_access_cookies, unset_jwt_cookies, get_csrf_token,
 )
 from .. import db, limiter
 from ..models import User, PasswordReset
-from ..notifications import send_whatsapp
+from ..notifications import send_otp
 from ..utils import ok, err, clean_str, normalize_phone, valid_phone, valid_password
 
 auth_bp = Blueprint("auth", __name__)
@@ -38,20 +37,13 @@ def login():
 
     token = create_access_token(identity=str(user.id),
                                 additional_claims={"role": user.role})
-    # Return the CSRF token in the body too. The JWT stays in an httpOnly cookie
-    # (XSS-safe); the CSRF token is echoed back as a header on writes. This is the
-    # pattern that works when frontend and backend are on different domains.
-    resp = jsonify({"success": True, "message": "Login successful",
-                    "data": {"user": user.to_dict(), "csrf": get_csrf_token(token)}})
-    set_access_cookies(resp, token)   # httpOnly cookie + CSRF cookie
-    return resp, 200
+    return ok({"token": token, "user": user.to_dict()}, "Login successful")
 
 
 @auth_bp.route("/logout", methods=["POST"])
 def logout():
-    resp = jsonify({"success": True, "message": "Logged out", "data": None})
-    unset_jwt_cookies(resp)
-    return resp, 200
+    # Stateless tokens: the client simply discards it. Endpoint kept for symmetry.
+    return ok(None, "Logged out")
 
 
 @auth_bp.route("/me", methods=["GET"])
@@ -111,9 +103,7 @@ def forgot_password():
     ))
     db.session.commit()
 
-    send_whatsapp(phone, f"Your Chai Pe Charcha admin reset code is {code}. "
-                         f"It expires in {RESET_CODE_TTL_MIN} minutes. "
-                         f"If you didn't request this, ignore this message.")
+    send_otp(phone, code)
     return generic
 
 

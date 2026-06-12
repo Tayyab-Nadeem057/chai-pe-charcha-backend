@@ -16,7 +16,7 @@ def test_login_rejects_bad_credentials(client):
     assert r.get_json()["success"] is False
 
 
-def test_login_sets_httponly_cookie(client, app):
+def test_login_returns_token(client, app):
     from werkzeug.security import generate_password_hash
     from app import db
     from app.models import User
@@ -27,8 +27,7 @@ def test_login_sets_httponly_cookie(client, app):
             db.session.commit()
     r = client.post("/api/auth/login", json={"phone": "03009998877", "password": "supersecret8"})
     assert r.status_code == 200
-    cookies = r.headers.getlist("Set-Cookie")
-    assert any("access_token_cookie" in c and "HttpOnly" in c for c in cookies)
+    assert r.get_json()["data"]["token"]
 
 
 # ── Authorization ─────────────────────────────────────────────────

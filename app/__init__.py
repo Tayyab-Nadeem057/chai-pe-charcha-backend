@@ -36,7 +36,8 @@ def create_app(config_object=Config):
         "http://localhost:5000", "http://127.0.0.1:5000",
         "http://localhost:5500", "http://127.0.0.1:5500",
     ]
-    CORS(app, resources={r"/api/*": {"origins": origins}}, supports_credentials=True)
+    CORS(app, resources={r"/api/*": {"origins": origins}},
+         allow_headers=["Content-Type", "Authorization"])
 
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
