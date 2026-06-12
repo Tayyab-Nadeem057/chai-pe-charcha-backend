@@ -31,6 +31,10 @@ class Order(db.Model):
     delivery_address = db.Column(db.Text,        nullable=False)
     service          = db.Column(db.String(20),  nullable=False, default="delivery")
     status           = db.Column(db.String(20),  nullable=False, default="Pending")
+    # Payment
+    payment_method   = db.Column(db.String(10),  nullable=False, default="cod")   # cod | card
+    payment_status   = db.Column(db.String(10),  nullable=False, default="unpaid")# unpaid | paid
+    payment_ref      = db.Column(db.String(120))                                   # gateway tracker/id
     created_at       = db.Column(db.DateTime,    default=datetime.utcnow)
 
     items = db.relationship("OrderItem", backref="order", lazy=True, cascade="all, delete-orphan")
@@ -40,6 +44,7 @@ class Order(db.Model):
             "id": self.id, "guest_name": self.guest_name, "guest_phone": self.guest_phone,
             "total_price": self.total_price, "delivery_address": self.delivery_address,
             "service": self.service, "status": self.status,
+            "payment_method": self.payment_method, "payment_status": self.payment_status,
             "created_at": self.created_at.isoformat(),
             "items": [item.to_dict() for item in self.items],
         }

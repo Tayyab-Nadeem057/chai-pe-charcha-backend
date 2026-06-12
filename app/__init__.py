@@ -89,10 +89,46 @@ def create_app(config_object=Config):
     # safe no-op for already-migrated tables and keeps local SQLite dev simple.
     with app.app_context():
         db.create_all()
+        _ensure_schema()
         _seed_menu()
         _bootstrap_admin()
 
     return app
+
+
+def _ensure_schema():
+    """Add columns introduced after tables were first created, without Alembic.
+    Safe + idempotent: only adds a column if it's missing. Runs mainly on the
+    existing production Postgres DB (fresh SQLite already has every column)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(db.engine)
+
+    def columns(table):
+        try:
+            return {c["name"] for c in insp.get_columns(table)}
+        except Exception:
+            return set()
+
+    additions = [
+        ("orders",      "service",        "VARCHAR(20) DEFAULT 'delivery'"),
+        ("orders",      "payment_method", "VARCHAR(10) DEFAULT 'cod'"),
+        ("orders",      "payment_status", "VARCHAR(10) DEFAULT 'unpaid'"),
+        ("orders",      "payment_ref",    "VARCHAR(120)"),
+        ("menu_items",  "variants",       "JSON"),
+        ("menu_items",  "image_url",      "VARCHAR(512)"),
+        ("menu_items",  "sold_out",       "BOOLEAN DEFAULT false"),
+        ("order_items", "item_id",        "INTEGER"),
+    ]
+    with db.engine.begin() as conn:
+        for table, col, ddl in additions:
+            existing = columns(table)
+            if existing and col not in existing:
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+                    print(f"[schema] added {table}.{col}")
+                except Exception as e:
+                    print(f"[schema] skip {table}.{col}: {e}")
 
 
 def _bootstrap_admin():

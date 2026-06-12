@@ -1,11 +1,19 @@
 from flask import Blueprint, request, make_response
 import json
+from config import Config
 from .. import db, limiter
 from ..models import Order, OrderItem, MenuCategory, MenuItem
 from ..utils import ok, err, clean_str, valid_phone, normalize_phone
 
 user_bp = Blueprint("user", __name__)
 VALID_SERVICES = {"delivery", "takeaway", "dinein"}
+VALID_PAYMENTS = {"cod", "card"}
+
+
+@user_bp.route("/config", methods=["GET"])
+def public_config():
+    """Non-sensitive flags the storefront needs (e.g. is card payment live)."""
+    return ok({"card_payment": Config.payments_enabled()})
 
 
 @user_bp.route("/menu", methods=["GET"])
@@ -39,6 +47,7 @@ def place_order():
     phone   = clean_str(data.get("phone"), 20)
     address = clean_str(data.get("delivery_address"), 500)
     service = clean_str(data.get("service"), 20).lower() or "delivery"
+    payment = clean_str(data.get("payment_method"), 10).lower() or "cod"
     items   = data.get("items")
 
     if not name:
@@ -49,6 +58,10 @@ def place_order():
         return err("delivery_address is required", 400)
     if service not in VALID_SERVICES:
         return err("invalid service type", 400)
+    if payment not in VALID_PAYMENTS:
+        return err("invalid payment method", 400)
+    if payment == "card" and not Config.payments_enabled():
+        return err("Online card payment isn't available yet. Please choose Cash on Delivery.", 400)
     if not isinstance(items, list) or not items:
         return err("items list is required and must not be empty", 400)
     if len(items) > 100:
@@ -89,7 +102,8 @@ def place_order():
 
     order = Order(guest_name=name, guest_phone=normalize_phone(phone),
                   total_price=total, delivery_address=address,
-                  service=service, status="Pending")
+                  service=service, status="Pending",
+                  payment_method=payment, payment_status="unpaid")
     db.session.add(order)
     db.session.flush()
 
@@ -98,7 +112,51 @@ def place_order():
                                  item_name=v["item_name"], quantity=v["quantity"],
                                  price=v["price"]))
     db.session.commit()
+
+    # Cash on delivery → done. Card → start a Safepay checkout and return its URL.
+    if payment == "card":
+        try:
+            from ..payments import create_checkout
+            checkout_url, token = create_checkout(order)
+            order.payment_ref = token
+            db.session.commit()
+            return ok({**order.to_dict(), "checkout_url": checkout_url},
+                      "Redirecting to secure payment", 201)
+        except Exception as e:
+            # Order still exists as unpaid; let the customer retry or pay on delivery.
+            return ok({**order.to_dict(), "checkout_url": None},
+                      "Order saved, but we couldn't start online payment. "
+                      "Please pay cash on delivery or try again.", 201)
+
     return ok(order.to_dict(), "Order placed successfully", 201)
+
+
+@user_bp.route("/payments/webhook", methods=["POST"])
+def payment_webhook():
+    """Safepay calls this server-to-server after a payment. This is the ONLY
+    thing that marks an order paid — never the browser."""
+    from ..payments import verify_webhook
+    raw = request.get_data()
+    sig = request.headers.get("X-SFPY-Signature") or request.headers.get("X-Safepay-Signature") or ""
+    if not verify_webhook(raw, sig):
+        return err("Invalid signature", 400)
+
+    payload = request.get_json(silent=True) or {}
+    data    = payload.get("data", payload)
+    meta    = data.get("metadata") or {}
+    order_id = meta.get("order_id") or data.get("order_id")
+    state    = (data.get("state") or data.get("status") or "").lower()
+
+    if not order_id:
+        return ok(None, "Ignored (no order id)")
+    order = db.session.get(Order, int(order_id))
+    if not order:
+        return ok(None, "Ignored (unknown order)")
+
+    if state in {"paid", "tracker_ended", "completed", "succeeded"}:
+        order.payment_status = "paid"
+        db.session.commit()
+    return ok(None, "Webhook processed")
 
 
 @user_bp.route("/orders/<int:order_id>", methods=["GET"])

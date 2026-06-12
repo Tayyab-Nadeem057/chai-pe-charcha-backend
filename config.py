@@ -62,3 +62,16 @@ class Config:
 
     # ── Rate limiting ─────────────────────────────────────────────
     RATELIMIT_STORAGE_URI = os.environ.get("RATELIMIT_STORAGE_URI", "memory://")
+
+    # ── Payments (Safepay) — card payments activate when these are set ──
+    SAFEPAY_API_KEY        = os.environ.get("SAFEPAY_API_KEY", "")
+    SAFEPAY_SECRET_KEY     = os.environ.get("SAFEPAY_SECRET_KEY", "")
+    SAFEPAY_WEBHOOK_SECRET = os.environ.get("SAFEPAY_WEBHOOK_SECRET", "")
+    SAFEPAY_ENV            = os.environ.get("SAFEPAY_ENV", "sandbox")  # sandbox | production
+    # Where Safepay sends the customer back after paying:
+    PAYMENT_SUCCESS_URL    = os.environ.get("PAYMENT_SUCCESS_URL", "")  # e.g. https://<you>.github.io/chai-pe-charcha/track.html
+    PAYMENT_CANCEL_URL     = os.environ.get("PAYMENT_CANCEL_URL", "")   # e.g. https://<you>.github.io/chai-pe-charcha/menu.html
+
+    @staticmethod
+    def payments_enabled():
+        return bool(os.environ.get("SAFEPAY_API_KEY") and os.environ.get("SAFEPAY_SECRET_KEY"))
