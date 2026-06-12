@@ -107,25 +107,41 @@ def _bootstrap_admin():
     from .utils import valid_phone, normalize_phone, valid_password
     from werkzeug.security import generate_password_hash
 
-    phone = (os.environ.get("BOOTSTRAP_ADMIN_PHONE") or "").strip()
-    pw    = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD") or ""
-    name  = (os.environ.get("BOOTSTRAP_ADMIN_NAME") or "Admin").strip()
+    phone    = (os.environ.get("BOOTSTRAP_ADMIN_PHONE") or "").strip()
+    pw       = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD") or ""
+    name     = (os.environ.get("BOOTSTRAP_ADMIN_NAME") or "Admin").strip()
+    do_reset = (os.environ.get("BOOTSTRAP_ADMIN_RESET") or "").lower() == "true"
 
+    if not phone and not pw:
+        print("[INFO] No BOOTSTRAP_ADMIN_* env vars set — skipping admin bootstrap.")
+        return
     if not phone or not pw:
-        return                      # not configured — nothing to do
-    if User.query.count() > 0:
-        return                      # already have accounts — never overwrite
+        print("[WARN] Need BOTH BOOTSTRAP_ADMIN_PHONE and BOOTSTRAP_ADMIN_PASSWORD — skipping.")
+        return
     if not valid_phone(phone):
-        print("[WARN] BOOTSTRAP_ADMIN_PHONE is not a valid phone — skipping bootstrap")
+        print(f"[WARN] BOOTSTRAP_ADMIN_PHONE '{phone}' is not a valid phone — skipping.")
         return
     if not valid_password(pw):
-        print("[WARN] BOOTSTRAP_ADMIN_PASSWORD must be at least 8 chars — skipping bootstrap")
+        print("[WARN] BOOTSTRAP_ADMIN_PASSWORD must be at least 8 characters — skipping.")
         return
 
-    db.session.add(User(name=name, phone=normalize_phone(phone), address="—",
+    phone_n  = normalize_phone(phone)
+    existing = User.query.filter_by(phone=phone_n).first()
+    if existing:
+        if do_reset:
+            existing.password = generate_password_hash(pw)
+            db.session.commit()
+            print(f"[OK] Bootstrap admin password RESET for {phone_n}. "
+                  f"Now remove BOOTSTRAP_ADMIN_RESET and BOOTSTRAP_ADMIN_PASSWORD.")
+        else:
+            print(f"[INFO] Admin {phone_n} already exists. To reset its password, "
+                  f"set BOOTSTRAP_ADMIN_RESET=true and redeploy.")
+        return
+
+    db.session.add(User(name=name, phone=phone_n, address="—",
                         password=generate_password_hash(pw), role="admin"))
     db.session.commit()
-    print(f"[OK] Bootstrap admin created (phone {normalize_phone(phone)}). "
+    print(f"[OK] Bootstrap admin created (phone {phone_n}). "
           f"You can now delete BOOTSTRAP_ADMIN_PASSWORD from the environment.")
 
 
